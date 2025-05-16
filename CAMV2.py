@@ -10,8 +10,8 @@ import logging
 # Настройка логгера
 logging.basicConfig(filename='detections.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# Инициализация модели YOLO с OBB
-model = YOLO('./object.onnx')  # Убедись, что это OBB-модель (например, yolo8n-obb.pt)
+# Инициализация обычной модели YOLO
+model = YOLO('./object.onnx')  # Например, yolo8n.onnx
 
 # Параметры отображения
 screen_width = 720
@@ -25,8 +25,8 @@ track_history = defaultdict(list)
 # Буфер последних 20 смещений
 offset_buffer = deque(maxlen=20)
 
-def save_offset(avg_x, avg_y, angle):
-    data = {'x': avg_x, 'y': avg_y, 'angle': angle}
+def save_offset(avg_x, avg_y):
+    data = {'x': avg_x, 'y': avg_y}
     tmp_filename = 'offsets_tmp.json'
     final_filename = 'offsets.json'
     try:
@@ -35,6 +35,7 @@ def save_offset(avg_x, avg_y, angle):
         os.replace(tmp_filename, final_filename)
     except Exception as e:
         logging.error(f"Error saving offsets: {e}")
+
 def crop_frame(frame, center_x, center_y, size):
     crop_x1 = max(center_x - size // 2, 0)
     crop_x2 = min(center_x + size // 2, frame.shape[1])
@@ -76,43 +77,33 @@ def main(model):
         center_x, center_y = frame.shape[1] // 2, frame.shape[0] // 2
         cropped_frame = crop_frame(frame, center_x, center_y, size)
 
-        results = model(cropped_frame, imgsz=320, conf=0.5)
+        results = model(cropped_frame, imgsz=320, conf=0.6)
         offset_x, offset_y = 0, 0
-        angle_deg = 0
 
-        if results and hasattr(results[0], 'obb') and results[0].obb is not None:
-            obb = results[0].obb
-            boxes = obb.xywhr.cpu().numpy()
-            angles = obb.xywhr[:, -1].cpu().numpy()  # Извлечение углов из последнего элемента xywhr
-            classes = obb.cls.int().cpu().tolist()
-            confidences = obb.conf.cpu().tolist()
+        if results and len(results[0].boxes) > 0:
+            boxes = results[0].boxes.xywh.cpu().numpy()
+            classes = results[0].boxes.cls.int().cpu().tolist()
+            confidences = results[0].boxes.conf.cpu().tolist()
 
-            for box, angle_rad, obj_class, confidence in zip(boxes, angles, classes, confidences):
-                x, y, w, h, _ = box
-                x, y, w, h = map(int, [x, y, w, h])
-                angle_deg = float(np.degrees(angle_rad))
+            for box, obj_class, confidence in zip(boxes, classes, confidences):
+                x, y, w, h = map(int, box)
 
                 cropped_center_x = cropped_frame.shape[1] // 2
                 cropped_center_y = cropped_frame.shape[0] // 2
                 offset_x = x - cropped_center_x
                 offset_y = y - cropped_center_y
-                
-                arrow_length = 40
-                end_x = int(x + arrow_length * np.cos(-angle_rad))
-                end_y = int(y + arrow_length * np.sin(-angle_rad))
-                cv2.arrowedLine(cropped_frame, (x, y), (end_x, end_y), (0, 255, 0), 2, tipLength=0.3)
-                
-                break
+
+                cv2.rectangle(cropped_frame, 
+                              (int(x - w / 2), int(y - h / 2)), 
+                              (int(x + w / 2), int(y + h / 2)), 
+                              (0, 255, 0), 2)
+                break  # Обрабатываем только первый объект
 
         # Обновление буфера и усреднение
-        if abs(angle_deg)>45:
-            avg_x, avg_y = offset_x, offset_y 
-            save_offset(avg_x, avg_y, angle_deg)
-        else:
-            offset_buffer.append((offset_x, offset_y))
-            avg_x = int(np.mean([x for x, _ in offset_buffer]))
-            avg_y = int(np.mean([y for _, y in offset_buffer]))
-            save_offset(avg_x, avg_y, angle_deg)
+        offset_buffer.append((offset_x, offset_y))
+        avg_x = int(np.mean([x for x, _ in offset_buffer]))
+        avg_y = int(np.mean([y for _, y in offset_buffer]))
+        save_offset(avg_x, avg_y)
 
         frame_resized = cv2.resize(frame, (screen_width, screen_height))
         display_frame(frame_resized, cropped_frame, fps, center_x, center_y, avg_x, avg_y)

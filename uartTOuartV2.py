@@ -87,44 +87,38 @@ def extract_channels(data):
 
     return channels
 
-def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
+def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, mavlink_connection):
     import json
     import logging
     import time
+    from pymavlink import mavutil
+    import numpy as np
 
-    # Параметры CRSF
     CENTER_TICKS = 992
     MIN_TICKS = 172
     MAX_TICKS = 1811
 
     FRAME_SIZE = 320
-    MAX_OFFSET_PX = FRAME_SIZE // 2  # 160 пикселей
+    MAX_OFFSET_PX = FRAME_SIZE // 2
     MAX_DEFLECTION_US = 300
-    MAX_DEFLECTION_TICKS = int(MAX_DEFLECTION_US * 8 / 5)  # = 480
+    MAX_DEFLECTION_TICKS = int(MAX_DEFLECTION_US * 8 / 5)
 
-    MAX_YAW_ANGLE = 45  # максимально допустимый угол yaw для управления
-    YAW_HYSTERESIS = 5  # гистерезис для стабильного переключения
+    YAW_SWITCH_THRESHOLD = 30  # отклонение в градусах от нуля
+    YAW_HYSTERESIS = 5         # гистерезис
 
-    glob_offset_x = 0
-    glob_offset_y = 0
-    glob_angle_yaw = 0
-
+    yaw_reference = None
     use_yaw_mode = False
 
     while not stop_event.is_set():
+        # Чтение offset_x и offset_y из JSON
         try:
             with open('offsets.json', 'r') as f:
                 offsets = json.load(f)
                 offset_x = offsets.get('x', 0)
                 offset_y = offsets.get('y', 0)
-                glob_angle_yaw = offsets.get('angle', 0)
         except:
-            offset_x = glob_offset_x
-            offset_y = glob_offset_y
-            glob_angle_yaw = 0
-
-        glob_offset_x = offset_x
-        glob_offset_y = offset_y
+            offset_x = 0
+            offset_y = 0
 
         offset_x = max(-MAX_OFFSET_PX, min(offset_x, MAX_OFFSET_PX))
         offset_y = max(-MAX_OFFSET_PX, min(offset_y, MAX_OFFSET_PX))
@@ -134,42 +128,55 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
 
         pitch_ticks = scale_offset_to_ticks(offset_y)
 
-        # --- Гистерезис переключения между режимами ---
-        if use_yaw_mode:
-            if abs(glob_angle_yaw) < (MAX_YAW_ANGLE - YAW_HYSTERESIS):
-                use_yaw_mode = False
-        else:
-            if abs(glob_angle_yaw) > (MAX_YAW_ANGLE + YAW_HYSTERESIS):
-                use_yaw_mode = True
+        # Получаем текущий YAW
+        try:
+            msg = mavlink_connection.recv_match(type='ATTITUDE', blocking=True, timeout=0.1)
+            if msg:
+                current_yaw_deg = np.degrees(msg.yaw)
 
-        if use_yaw_mode:
-            # Управление по YAW, если объект сильно наклонен
-            delta_yaw = -glob_angle_yaw  # Стремимся к 0°
-            delta_yaw = max(-MAX_YAW_ANGLE, min(MAX_YAW_ANGLE, delta_yaw))
-            yaw_ticks = int(delta_yaw / MAX_YAW_ANGLE * MAX_DEFLECTION_TICKS)
-            channels_old[3] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + yaw_ticks))  # YAW
-            channels_old[0] = CENTER_TICKS  # ROLL нейтрален
-        else:
-            # Управление по ROLL, если объект ориентирован прямо
-            roll_ticks = scale_offset_to_ticks(offset_x)
-            channels_old[0] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + roll_ticks))  # ROLL
-            channels_old[3] = CENTER_TICKS  # YAW нейтрален
+                if yaw_reference is None:
+                    yaw_reference = current_yaw_deg  # Установка нуля при первом запуске
 
-        # PITCH управляется всегда
-        channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))  # PITCH
+                yaw_diff = current_yaw_deg - yaw_reference
+                yaw_diff = (yaw_diff + 180) % 360 - 180  # Приводим к диапазону [-180, 180]
 
-        # Логирование
-        logging.debug(
-            f"[RC Update] Mode: {'YAW' if use_yaw_mode else 'ROLL'} | "
-            f"ROLL: {channels_old[0]}, PITCH: {channels_old[1]}, YAW: {channels_old[3]}"
-        )
+                # Гистерезис переключения
+                if use_yaw_mode:
+                    if abs(yaw_diff) < (YAW_SWITCH_THRESHOLD - YAW_HYSTERESIS):
+                        use_yaw_mode = False
+                else:
+                    if abs(yaw_diff) > (YAW_SWITCH_THRESHOLD + YAW_HYSTERESIS):
+                        use_yaw_mode = True
 
-        # Упаковка и отправка
-        packed_channels = pack_channels(channels_old)
-        data_without_crc_old[3:25] = packed_channels
-        crc = crc8(data_without_crc_old[2:25])
-        updated_data = data_without_crc_old + [crc]
-        uart4.write(bytes(updated_data))
+                if use_yaw_mode:
+                    # Управление по YAW: возвращаем к нулевому yaw_reference
+                    yaw_ticks = int(-yaw_diff / 180 * MAX_DEFLECTION_TICKS)
+                    channels_old[3] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + yaw_ticks))
+                    channels_old[0] = CENTER_TICKS  # ROLL нейтрально
+                else:
+                    # Управление по ROLL и PITCH
+                    roll_ticks = scale_offset_to_ticks(offset_x)
+                    channels_old[0] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + roll_ticks))
+                    channels_old[3] = CENTER_TICKS  # YAW нейтрально
+
+                # PITCH управляется всегда
+                channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))
+
+                # Отправка по UART
+                packed_channels = pack_channels(channels_old)
+                data_without_crc_old[3:25] = packed_channels
+                crc = crc8(data_without_crc_old[2:25])
+                updated_data = data_without_crc_old + [crc]
+                uart4.write(bytes(updated_data))
+
+                # Лог
+                logging.debug(
+                    f"[RC] Mode: {'YAW' if use_yaw_mode else 'ROLL'} | "
+                    f"YAW_DIFF: {yaw_diff:.2f}° | "
+                    f"ROLL: {channels_old[0]}, PITCH: {channels_old[1]}, YAW: {channels_old[3]}"
+                )
+        except Exception as e:
+            logging.error(f"[RC Error] MAVLink read failed: {e}")
 
     global is_thread_running
     is_thread_running = False
