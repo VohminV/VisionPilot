@@ -87,12 +87,13 @@ def extract_channels(data):
 
     return channels
 
-def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, mavlink_connection):
+def track_and_control_rc_channels(channels_old, uart4, data_without_crc_old):
     import json
     import logging
     import time
     from pymavlink import mavutil
     import numpy as np
+    import os
 
     CENTER_TICKS = 992
     MIN_TICKS = 172
@@ -103,23 +104,40 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, 
     MAX_DEFLECTION_US = 300
     MAX_DEFLECTION_TICKS = int(MAX_DEFLECTION_US * 8 / 5)
 
-    YAW_SWITCH_THRESHOLD = 30  # отклонение в градусах от нуля
-    YAW_HYSTERESIS = 5         # гистерезис
+    YAW_SWITCH_THRESHOLD = 30  # градусов
+    YAW_HYSTERESIS = 5
 
     yaw_reference = None
     use_yaw_mode = False
-
+    last_valid_offset_time = time.time()
+    offset_timeout = 1.0  # секунды до потери объекта
+    
+    mavlink_connection = mavutil.mavlink_connection('/dev/ttyS0', baud=52000)
+    
     while not stop_event.is_set():
-        # Чтение offset_x и offset_y из JSON
+        current_time = time.time()
+
+        # === Чтение offset_x и offset_y ===
         try:
             with open('offsets.json', 'r') as f:
                 offsets = json.load(f)
                 offset_x = offsets.get('x', 0)
                 offset_y = offsets.get('y', 0)
+                last_valid_offset_time = current_time
+                object_detected = True
         except:
+            object_detected = False
             offset_x = 0
             offset_y = 0
 
+        # === Потеря объекта ===
+        if current_time - last_valid_offset_time > offset_timeout:
+            object_detected = False
+            offset_x = 0
+            offset_y = 0
+            logging.warning("[RC] Object lost — reverting to CENTER_TICKS")
+
+        # Ограничение по пикселям
         offset_x = max(-MAX_OFFSET_PX, min(offset_x, MAX_OFFSET_PX))
         offset_y = max(-MAX_OFFSET_PX, min(offset_y, MAX_OFFSET_PX))
 
@@ -128,28 +146,31 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, 
 
         pitch_ticks = scale_offset_to_ticks(offset_y)
 
-        # Получаем текущий YAW
+        # === Получение текущего YAW ===
         try:
-            msg = mavlink_connection.recv_match(type='ATTITUDE', blocking=True, timeout=0.1)
+            msg = mavlink_connection.recv_match(type='ATTITUDE', blocking=False)
             if msg:
                 current_yaw_deg = np.degrees(msg.yaw)
 
-                if yaw_reference is None:
-                    yaw_reference = current_yaw_deg  # Установка нуля при первом запуске
+                if yaw_reference is None and object_detected:
+                    yaw_reference = current_yaw_deg
+                    logging.info(f"[RC] YAW reference set to {yaw_reference:.2f}°")
 
                 yaw_diff = current_yaw_deg - yaw_reference
-                yaw_diff = (yaw_diff + 180) % 360 - 180  # Приводим к диапазону [-180, 180]
+                yaw_diff = (yaw_diff + 180) % 360 - 180  # [-180, 180]
 
-                # Гистерезис переключения
+                # === Переключение режима на основе YAW ===
                 if use_yaw_mode:
                     if abs(yaw_diff) < (YAW_SWITCH_THRESHOLD - YAW_HYSTERESIS):
                         use_yaw_mode = False
+                        logging.info("[RC] Switching to ROLL mode")
                 else:
                     if abs(yaw_diff) > (YAW_SWITCH_THRESHOLD + YAW_HYSTERESIS):
                         use_yaw_mode = True
+                        logging.info("[RC] Switching to YAW mode")
 
                 if use_yaw_mode:
-                    # Управление по YAW: возвращаем к нулевому yaw_reference
+                    # Управление по YAW: корректируем отклонение
                     yaw_ticks = int(-yaw_diff / 180 * MAX_DEFLECTION_TICKS)
                     channels_old[3] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + yaw_ticks))
                     channels_old[0] = CENTER_TICKS  # ROLL нейтрально
@@ -159,17 +180,17 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, 
                     channels_old[0] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + roll_ticks))
                     channels_old[3] = CENTER_TICKS  # YAW нейтрально
 
-                # PITCH управляется всегда
+                # Всегда управляем PITCH
                 channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))
 
-                # Отправка по UART
+                # === Отправка RC по UART ===
                 packed_channels = pack_channels(channels_old)
                 data_without_crc_old[3:25] = packed_channels
                 crc = crc8(data_without_crc_old[2:25])
                 updated_data = data_without_crc_old + [crc]
                 uart4.write(bytes(updated_data))
 
-                # Лог
+                # Логирование
                 logging.debug(
                     f"[RC] Mode: {'YAW' if use_yaw_mode else 'ROLL'} | "
                     f"YAW_DIFF: {yaw_diff:.2f}° | "
@@ -181,14 +202,13 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, 
     global is_thread_running
     is_thread_running = False
 
-
 # Функция для запуска потока обновления RC каналов
-def start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old):
+def start_track_and_control_rc_channels_thread(channels_old, uart4, data_without_crc_old):
     global is_thread_running  # нужно явно указать, что используем глобальную переменную
     if not is_thread_running:
         stop_event.clear()
         update_thread = threading.Thread(
-            target=update_rc_channels_in_background,
+            target=track_and_control_rc_channels,
             args=(channels_old, uart4, data_without_crc_old)
         )
         update_thread.daemon = True  # Поток завершится при завершении основного потока
@@ -222,7 +242,7 @@ def update_rc_channels(data, uart4):
             if data_without_crc_old is None:
                 data_without_crc_old = data_without_crc
             # Запускаем поток для обновления каналов в фоне
-            start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old)
+            start_track_and_control_rc_channels_thread(channels_old, uart4, data_without_crc_old)
 
     # Завершаем выполнение, если канал 11 меньше или равен 1700
     else:
