@@ -11,8 +11,8 @@ import math
 # Настройка логгера
 logging.basicConfig(filename='detections.log', level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# Инициализация модели YOLO сегментации (укажи путь к своей модели)
-model = YOLO('Y.pt')
+# Инициализация модели YOLO сегментации
+model = YOLO('Y.onnx', task='segment')
 
 # Параметры отображения
 screen_width = 720
@@ -20,7 +20,6 @@ screen_height = 576
 cv2.namedWindow("Detection", cv2.WND_PROP_FULLSCREEN)
 cv2.setWindowProperty("Detection", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-# Буферы последних 20 смещений центра и углов объекта
 offset_buffer = deque(maxlen=20)
 
 def save_offset(avg_x, avg_y):
@@ -76,7 +75,7 @@ def main(model):
         center_x, center_y = frame.shape[1] // 2, frame.shape[0] // 2
         cropped_frame = crop_frame(frame, center_x, center_y, size)
 
-        results = model(cropped_frame, imgsz=320, conf=0.75)
+        results = model(cropped_frame, imgsz=320, conf=0.8)
 
         offset_x, offset_y = 0, 0
         avg_angle = 0
@@ -86,8 +85,7 @@ def main(model):
             class_ids = boxes.cls.cpu().numpy()
             confidences = boxes.conf.cpu().numpy()
 
-            target_class_id = 0  # укажи здесь нужный класс (если у тебя 1 класс — 0)
-            # Найти индекс маски с наибольшим confidence для нужного класса
+            target_class_id = 0
             best_mask_idx = -1
             best_conf = 0
             for i, (cls_id, conf) in enumerate(zip(class_ids, confidences)):
@@ -97,20 +95,16 @@ def main(model):
 
             if best_mask_idx >= 0:
                 mask_tensor = results[0].masks.data[best_mask_idx]
-                mask = mask_tensor.cpu().numpy().astype(np.uint8)
+                mask = (mask_tensor.cpu().numpy() * 255).astype(np.uint8)
 
-                # Контуры
+                # Найдём границу маски
                 contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if contours:
-                    cv2.drawContours(cropped_frame, contours, -1, (0, 255, 255), 2)
+                    contour = max(contours, key=cv2.contourArea)
+                    cv2.polylines(cropped_frame, [contour], isClosed=True, color=(0, 255, 255), thickness=2)
 
-                    cnt = contours[0]
-                    rect = cv2.minAreaRect(cnt)
-                    (center_x_rect, center_y_rect), (w, h), angle = rect
-                    if w < h:
-                        angle = 90 + angle
-
-                    moments = cv2.moments(mask)
+                    # Центр
+                    moments = cv2.moments(contour)
                     if moments["m00"] != 0:
                         cX = int(moments["m10"] / moments["m00"])
                         cY = int(moments["m01"] / moments["m00"])
@@ -120,6 +114,13 @@ def main(model):
                     offset_x = cX - cropped_frame.shape[1] // 2
                     offset_y = cY - cropped_frame.shape[0] // 2
 
+                    # Угол объекта
+                    rect = cv2.minAreaRect(contour)
+                    (center_x_rect, center_y_rect), (w, h), angle = rect
+                    if w < h:
+                        angle = 90 + angle
+
+                    # Рисуем стрелку направления
                     cv2.circle(cropped_frame, (cX, cY), 5, (0, 0, 255), -1)
                     length = 50
                     angle_rad = math.radians(angle)
@@ -128,12 +129,6 @@ def main(model):
                     cv2.arrowedLine(cropped_frame, (cX, cY), (end_x, end_y), (255, 0, 0), 2)
 
                     logging.info(f"Smoothed angle: {angle:.2f} degrees")
-
-            # --- Визуализация всех масок (для отладки) ---
-            #for i, mask_tensor in enumerate(results[0].masks.data):
-            #    mask_viz = mask_tensor.cpu().numpy().astype(np.uint8) * 255
-            #    cv2.imshow(f"mask_{i}", mask_viz)
-            # -------------------------------------------
 
         offset_buffer.append((offset_x, offset_y))
         avg_x = int(np.mean([x for x, _ in offset_buffer]))
