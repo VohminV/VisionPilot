@@ -9,11 +9,26 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout репозитория
+        uses: actions/checkout@v3
+
+      - name: Получение информации о последнем коммите
+        id: gitinfo
+        run: |
+          COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+          COMMIT_AUTHOR=$(git log -1 --pretty="%an")
+          CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r ${{ github.sha }} | paste -sd ", " -)
+          echo "message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
+          echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
+          echo "files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+
       - name: Отправка уведомления в Discord
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           curl -H "Content-Type: application/json" \
                -X POST \
-               -d "{\"content\": \"📦 Новый пуш от ${{ github.actor }} в репозиторий ${{ github.repository }}!\"}" \
+               -d "{
+                    \"content\": \"📦 Новый пуш от ${{ github.actor }} в репозиторий ${{ github.repository }}!\n👤 Автор: ${{ steps.gitinfo.outputs.author }}\n📝 Сообщение коммита: ${{ steps.gitinfo.outputs.message }}\n📂 Изменённые файлы: ${{ steps.gitinfo.outputs.files }}\"
+                   }" \
                $DISCORD_WEBHOOK
