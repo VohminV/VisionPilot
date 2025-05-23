@@ -87,6 +87,16 @@ def extract_channels(data):
 
     return channels
 
+MIN_SAFE_DISTANCE = 1000  # миллиметры, например, 1 метр
+lidar_distance = None
+
+def get_lidar_distance():
+    # Здесь твоя логика получения данных с лидар
+    # Например, читаешь из файла, через mavlink или напрямую с устройства
+    # Для примера вернём фиксированное значение
+    return 1200  # миллиметры
+
+
 def track_and_control_rc_channels(channels_old, uart4, data_without_crc_old):
     import json
     import logging
