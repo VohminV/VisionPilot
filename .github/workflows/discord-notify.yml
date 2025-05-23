@@ -1,20 +1,19 @@
 name: Notify Discord on Push
-on: [pull_request]
+
+on:
+  push:
+    branches:
+      - main
 
 jobs:
-  testing:
-    name: Testing
-    runs-on: ubuntu-18.04
+  notify:
+    runs-on: ubuntu-latest
     steps:
-      - name: Send start notification to Discord
-        uses: appleboy/discord-action@master
-        with:
-          webhook_id: ${{ secrets.DISCORD_WEBHOOK_ID }}
-          webhook_token: ${{ secrets.DISCORD_WEBHOOK_TOKEN }}
-          color: "#8b9b9c"
-          username: "GitHub Bot"
-          message: |
-            Tests started by 👤 ${{ github.actor }}
-            From `${{ github.head_ref }}` to `${{ github.base_ref }}`
-            Event `${{ github.event_name }}`
-            PR ${{ github.event.number }}: ${{ github.event.pull_request.url }}
+      - name: Отправка уведомления в Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d "{\"content\": \"📦 Новый пуш от ${{ github.actor }} в репозиторий ${{ github.repository }}!\"}" \
+               $DISCORD_WEBHOOK
