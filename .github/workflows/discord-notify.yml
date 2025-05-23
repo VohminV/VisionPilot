@@ -18,11 +18,8 @@ jobs:
           COMMIT_SHA=$(git rev-parse HEAD)
           COMMIT_MESSAGE=$(git log -1 --format=%B)
           COMMIT_AUTHOR=$(git log -1 --format="%an")
-          CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r $COMMIT_SHA | paste -sd ", " -)
-
           echo "message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
           echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
-          echo "files=$CHANGED_FILES" >> $GITHUB_OUTPUT
 
       - name: Отправка уведомления в Discord
         env:
@@ -31,6 +28,6 @@ jobs:
           curl -H "Content-Type: application/json" \
                -X POST \
                -d "{
-                 \"content\": \"📦 Новый пуш от ${{ github.actor }} в репозиторий ${{ github.repository }}!\n👤 Автор коммита: ${{ steps.gitinfo.outputs.author }}\n📝 Сообщение: ${{ steps.gitinfo.outputs.message }}"
+                 \"content\": \"📦 Новый пуш от ${{ github.actor }} в репозиторий ${{ github.repository }}!\n👤 Автор коммита: ${{ steps.gitinfo.outputs.author }}\n📝 Сообщение: ${{ steps.gitinfo.outputs.message }}\"
                }" \
                $DISCORD_WEBHOOK
