@@ -15,18 +15,13 @@ jobs:
       - name: Получение информации о последнем коммите
         id: gitinfo
         run: |
+          COMMIT_SHA=$(git rev-parse HEAD)
           COMMIT_MESSAGE=$(git log -1 --pretty=%B)
           COMMIT_AUTHOR=$(git log -1 --pretty="%an")
           
-          # Определим, является ли коммит первым
-          if git rev-parse HEAD^ >/dev/null 2>&1; then
-            # Не первый коммит — сравниваем с предыдущим
-            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD | paste -sd ", " -)
-          else
-            # Первый коммит — берём напрямую из логов
-            CHANGED_FILES=$(git log -1 --name-only --pretty="" | paste -sd ", " -)
-          fi
-          
+          # Получаем только изменённые файлы из последнего коммита
+          CHANGED_FILES=$(git show --pretty="" --name-only $COMMIT_SHA | paste -sd ", " -)
+
           echo "message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
           echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
           echo "files=$CHANGED_FILES" >> $GITHUB_OUTPUT
