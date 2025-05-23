@@ -73,7 +73,7 @@
 ## Контакты
 
 Для вопросов и предложений создавайте issue или пишите на email: vohmin3@yandex.ru
-
+Discord канал https://discord.gg/V2quvqz9S6
 ---
 
 Спасибо за интерес к проекту VisionPilot!
