@@ -12,12 +12,12 @@ jobs:
       - name: Checkout репозитория
         uses: actions/checkout@v3
 
-      - name: Получение информации о последнем коммите
+      - name: Получение информации о последнем пуше
         id: gitinfo
         run: |
           COMMIT_MESSAGE=$(git log -1 --pretty=%B)
           COMMIT_AUTHOR=$(git log -1 --pretty="%an")
-          CHANGED_FILES=$(git show --pretty="" --name-only ${{ github.sha }} | paste -sd ", " -)
+          CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | paste -sd ", " -)
           echo "message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
           echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
           echo "files=$CHANGED_FILES" >> $GITHUB_OUTPUT
