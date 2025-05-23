@@ -12,12 +12,21 @@ jobs:
       - name: Checkout репозитория
         uses: actions/checkout@v3
 
-      - name: Получение информации о последнем пуше
+      - name: Получение информации о последнем коммите
         id: gitinfo
         run: |
           COMMIT_MESSAGE=$(git log -1 --pretty=%B)
           COMMIT_AUTHOR=$(git log -1 --pretty="%an")
-          CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | paste -sd ", " -)
+          
+          # Определим, является ли коммит первым
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            # Не первый коммит — сравниваем с предыдущим
+            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD | paste -sd ", " -)
+          else
+            # Первый коммит — берём напрямую из логов
+            CHANGED_FILES=$(git log -1 --name-only --pretty="" | paste -sd ", " -)
+          fi
+          
           echo "message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
           echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
           echo "files=$CHANGED_FILES" >> $GITHUB_OUTPUT
@@ -29,6 +38,6 @@ jobs:
           curl -H "Content-Type: application/json" \
                -X POST \
                -d "{
-                    \"content\": \"📦 Новый пуш от ${{ github.actor }} в репозиторий ${{ github.repository }}!\n👤 Автор коммита: ${{ steps.gitinfo.outputs.author }}\n📝 Сообщение: ${{ steps.gitinfo.outputs.message }}\n📂 Изменённые файлы: ${{ steps.gitinfo.outputs.files }}\"
-                   }" \
+                 \"content\": \"📦 Новый пуш от ${{ github.actor }} в репозиторий ${{ github.repository }}!\n👤 Автор коммита: ${{ steps.gitinfo.outputs.author }}\n📝 Сообщение: ${{ steps.gitinfo.outputs.message }}\n📂 Изменённые файлы: ${{ steps.gitinfo.outputs.files }}\"
+               }" \
                $DISCORD_WEBHOOK
