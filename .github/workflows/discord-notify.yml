@@ -16,11 +16,9 @@ jobs:
         id: gitinfo
         run: |
           COMMIT_SHA=$(git rev-parse HEAD)
-          COMMIT_MESSAGE=$(git log -1 --pretty=%B)
-          COMMIT_AUTHOR=$(git log -1 --pretty="%an")
-          
-          # Получаем только изменённые файлы из последнего коммита
-          CHANGED_FILES=$(git show --pretty="" --name-only $COMMIT_SHA | paste -sd ", " -)
+          COMMIT_MESSAGE=$(git log -1 --format=%B)
+          COMMIT_AUTHOR=$(git log -1 --format="%an")
+          CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r $COMMIT_SHA | paste -sd ", " -)
 
           echo "message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
           echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
