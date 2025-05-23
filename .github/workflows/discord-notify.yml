@@ -17,7 +17,7 @@ jobs:
         run: |
           COMMIT_MESSAGE=$(git log -1 --pretty=%B)
           COMMIT_AUTHOR=$(git log -1 --pretty="%an")
-          CHANGED_FILES=$(git log -1 --name-only | grep -v '^$' | paste -sd ", " -)
+          CHANGED_FILES=$(git show --pretty="" --name-only ${{ github.sha }} | paste -sd ", " -)
           echo "message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
           echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
           echo "files=$CHANGED_FILES" >> $GITHUB_OUTPUT
