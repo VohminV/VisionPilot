@@ -17,7 +17,8 @@ jobs:
         run: |
           COMMIT_MESSAGE=$(git log -1 --pretty=%B)
           COMMIT_AUTHOR=$(git log -1 --pretty="%an")
-          CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r ${{ github.sha }} | paste -sd ", " -)
+          # Сравнение изменений между предыдущим и текущим коммитом
+          CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | paste -sd ", " -)
           echo "message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
           echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
           echo "files=$CHANGED_FILES" >> $GITHUB_OUTPUT
@@ -29,6 +30,6 @@ jobs:
           curl -H "Content-Type: application/json" \
                -X POST \
                -d "{
-                    \"content\": \"📦 Новый пуш от ${{ github.actor }} в репозиторий ${{ github.repository }}!\n👤 Автор: ${{ steps.gitinfo.outputs.author }}\n📝 Сообщение коммита: ${{ steps.gitinfo.outputs.message }}\n📂 Изменённые файлы: ${{ steps.gitinfo.outputs.files }}\"
+                    \"content\": \"📦 Новый пуш от ${{ github.actor }} в репозиторий ${{ github.repository }}!\n👤 Автор коммита: ${{ steps.gitinfo.outputs.author }}\n📝 Сообщение: ${{ steps.gitinfo.outputs.message }}\n📂 Изменённые файлы: ${{ steps.gitinfo.outputs.files }}\"
                    }" \
                $DISCORD_WEBHOOK
