@@ -16,7 +16,8 @@ jobs:
         id: gitinfo
         run: |
           COMMIT_SHA=$(git rev-parse HEAD)
-          COMMIT_MESSAGE=$(git log -1 --format=%B)
+          # Убираем перевод строки из сообщения коммита
+          COMMIT_MESSAGE=$(git log -1 --format=%B | tr '\n' ' ')
           COMMIT_AUTHOR=$(git log -1 --format="%an")
           echo "message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
           echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
