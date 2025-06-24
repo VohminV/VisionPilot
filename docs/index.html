@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VisionPilot</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <img src="images/logo.png" alt="VisionPilot logo" class="logo" />
+    <h1>VisionPilot</h1>
+    <p>Автономный автопилот на базе Orange Pi и компьютерного зрения</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>🚀 Возможности</h2>
+      <ul>
+        <li>Обнаружение объектов через YOLOv8</li>
+        <li>CRSF протокол управления дроном (UART)</li>
+        <li>Интеграция с RKNN Toolkit</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>⚙️ Установка</h2>
+      <pre><code>
+git clone https://github.com/VohminV/VisionPilot.git
+cd VisionPilot
+pip install -r requirements.txt
+python CAMV2.py
+python uartTOuartV2.py
+      </code></pre>
+    </section>
+
+    <section>
+      <h2>📷 Скриншоты</h2>
+
+    </section>
+
+    <section>
+      <h2>📫 Контакты</h2>
+      <p>Email: <a href="mailto:vohmin3@yandex.ru">vohmin3@yandex.ru</a></p>
+      <p>GitHub: <a href="https://github.com/VohminV/VisionPilot" target="_blank">VohminV/VisionPilot</a></p>
+    </section>
+  </main>
+
+  <footer>
+    <p>MIT License © 2024 VohminV</p>
+  </footer>
+</body>
+</html>

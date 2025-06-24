@@ -1,0 +1,33 @@
+body {
+  font-family: Arial, sans-serif;
+  background: #f4f4f4;
+  color: #333;
+  margin: 0;
+  padding: 0;
+}
+header {
+  background: #004080;
+  color: white;
+  padding: 2rem;
+  text-align: center;
+}
+.logo {
+  width: 100px;
+}
+main {
+  padding: 2rem;
+}
+section {
+  margin-bottom: 2rem;
+}
+.screenshot {
+  width: 100%;
+  max-width: 600px;
+  display: block;
+  margin-bottom: 1rem;
+}
+footer {
+  background: #ddd;
+  text-align: center;
+  padding: 1rem;
+}

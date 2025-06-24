@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import threading
+from pymavlink import mavutil
 
 # Настройка логгера
 logging.basicConfig(
@@ -40,11 +41,56 @@ crc8tab = [
 
 channels_old = None
 data_without_crc_old = None
-
+speed_old = None
+correction_active = False
 # Объект события для остановки потока
 stop_event = threading.Event()
 # Флаг для проверки, запущен ли поток
 is_thread_running = False
+
+current_altitude = 0.0
+
+### PID-КОНТРОЛЛЕР ###
+class SmoothPIDController:
+    def __init__(self, kp=30.0, ki=2.0, kd=10.0, integrator_limit=500.0, output_limits=(None, None)):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.integrator = 0.0
+        self.last_error = 0.0
+        self.last_time = None
+        self.integrator_limit = integrator_limit
+        self.output_min, self.output_max = output_limits
+
+    def reset(self):
+        self.integrator = 0.0
+        self.last_error = 0.0
+        self.last_time = None
+
+    def update(self, error, current_time=None):
+        now = current_time if current_time is not None else time.time()
+        if self.last_time is None:
+            dt = 0.05
+        else:
+            dt = now - self.last_time
+
+        p = self.kp * error
+        self.integrator += error * dt
+        self.integrator = max(-self.integrator_limit, min(self.integrator, self.integrator_limit))
+        i = self.ki * self.integrator
+        derivative = (error - self.last_error) / dt if dt > 0 else 0.0
+        d = self.kd * derivative
+
+        output = p + i + d
+        if self.output_min is not None:
+            output = max(self.output_min, output)
+        if self.output_max is not None:
+            output = min(self.output_max, output)
+
+        self.last_error = error
+        self.last_time = now
+        return output
+
 
 def crc8(data):
     crc = 0
@@ -66,7 +112,7 @@ def pack_channels(channel_data):
         pack_byte.append(current_byte)
     pack_byte = list(reversed(pack_byte))
     return pack_byte
-
+    
 # Function to extract channels from the CRSF payload (22 bytes representing 16 channels)
 def extract_channels(data):
     channels = []
@@ -87,144 +133,95 @@ def extract_channels(data):
 
     return channels
 
-MIN_SAFE_DISTANCE = 1000  # миллиметры, например, 1 метр
-lidar_distance = None
+### MAVLINK ###
+def mavlink_listener():
+    global current_altitude
+    master = mavutil.mavlink_connection('/dev/ttyS1', baud=57600)
+    master.wait_heartbeat()
+    print("✅ MAVLink подключён")
 
-def get_lidar_distance():
-    # Здесь твоя логика получения данных с лидар
-    # Например, читаешь из файла, через mavlink или напрямую с устройства
-    # Для примера вернём фиксированное значение
-    return 1200  # миллиметры
+    while True:
+        msg = master.recv_match(type=['GLOBAL_POSITION_INT', 'VFR_HUD'], blocking=True)
+        if msg:
+            if msg.get_type() == 'GLOBAL_POSITION_INT':
+                current_altitude = msg.relative_alt / 1000.0
+            elif msg.get_type() == 'VFR_HUD':
+                current_altitude = msg.alt
 
 
-def track_and_control_rc_channels(channels_old, uart4, data_without_crc_old):
+def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
     import json
     import logging
     import time
-    from pymavlink import mavutil
-    import numpy as np
-    import os
 
+    # Параметры CRSF
     CENTER_TICKS = 992
     MIN_TICKS = 172
     MAX_TICKS = 1811
 
     FRAME_SIZE = 320
-    MAX_OFFSET_PX = FRAME_SIZE // 2
+    MAX_OFFSET_PX = FRAME_SIZE // 2  # 160 пикселей
     MAX_DEFLECTION_US = 300
-    MAX_DEFLECTION_TICKS = int(MAX_DEFLECTION_US * 8 / 5)
+    MAX_DEFLECTION_TICKS = int(MAX_DEFLECTION_US * 8 / 5)  # = 480
 
-    YAW_SWITCH_THRESHOLD = 30  # градусов
-    YAW_HYSTERESIS = 5
+    MAX_YAW_ANGLE = 45  # максимально допустимый угол yaw для управления
+    YAW_HYSTERESIS = 5  # гистерезис для стабильного переключения
 
-    yaw_reference = None
+    glob_offset_x = 0
+    glob_offset_y = 0
+
     use_yaw_mode = False
-    last_valid_offset_time = time.time()
-    offset_timeout = 1.0  # секунды до потери объекта
-    
-    mavlink_connection = mavutil.mavlink_connection('/dev/ttyS0', baud=52000)
-    
-    while not stop_event.is_set():
-        current_time = time.time()
 
-        # === Чтение offset_x и offset_y ===
+    while not stop_event.is_set():
         try:
             with open('offsets.json', 'r') as f:
                 offsets = json.load(f)
                 offset_x = offsets.get('x', 0)
                 offset_y = offsets.get('y', 0)
-                last_valid_offset_time = current_time
-                object_detected = True
         except:
-            object_detected = False
-            offset_x = 0
-            offset_y = 0
+            offset_x = glob_offset_x
+            offset_y = glob_offset_y
 
-        # === Потеря объекта ===
-        if current_time - last_valid_offset_time > offset_timeout:
-            object_detected = False
-            offset_x = 0
-            offset_y = 0
-            logging.warning("[RC] Object lost — reverting to CENTER_TICKS")
+        glob_offset_x = offset_x
+        glob_offset_y = offset_y
 
-        # Ограничение по пикселям
         offset_x = max(-MAX_OFFSET_PX, min(offset_x, MAX_OFFSET_PX))
         offset_y = max(-MAX_OFFSET_PX, min(offset_y, MAX_OFFSET_PX))
 
         def scale_offset_to_ticks(offset_px):
             return int(offset_px * MAX_DEFLECTION_TICKS / MAX_OFFSET_PX)
-
+        
+        #ROLL
+        roll_ticks = scale_offset_to_ticks(offset_x)
+        channels_old[0] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + roll_ticks))  # ROLL
+        # PITCH
         pitch_ticks = scale_offset_to_ticks(offset_y)
+        channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))  # PITCH
 
-        # === Получение текущего YAW ===
-        try:
-            msg = mavlink_connection.recv_match(type='ATTITUDE', blocking=False)
-            if msg:
-                current_yaw_deg = np.degrees(msg.yaw)
-
-                if yaw_reference is None and object_detected:
-                    yaw_reference = current_yaw_deg
-                    logging.info(f"[RC] YAW reference set to {yaw_reference:.2f}°")
-
-                yaw_diff = current_yaw_deg - yaw_reference
-                yaw_diff = (yaw_diff + 180) % 360 - 180  # [-180, 180]
-
-                # === Переключение режима на основе YAW ===
-                if use_yaw_mode:
-                    if abs(yaw_diff) < (YAW_SWITCH_THRESHOLD - YAW_HYSTERESIS):
-                        use_yaw_mode = False
-                        logging.info("[RC] Switching to ROLL mode")
-                else:
-                    if abs(yaw_diff) > (YAW_SWITCH_THRESHOLD + YAW_HYSTERESIS):
-                        use_yaw_mode = True
-                        logging.info("[RC] Switching to YAW mode")
-
-                if use_yaw_mode:
-                    # Управление по YAW: корректируем отклонение
-                    yaw_ticks = int(-yaw_diff / 180 * MAX_DEFLECTION_TICKS)
-                    channels_old[3] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + yaw_ticks))
-                    channels_old[0] = CENTER_TICKS  # ROLL нейтрально
-                else:
-                    # Управление по ROLL и PITCH
-                    roll_ticks = scale_offset_to_ticks(offset_x)
-                    channels_old[0] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + roll_ticks))
-                    channels_old[3] = CENTER_TICKS  # YAW нейтрально
-
-                # Всегда управляем PITCH
-                channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))
-
-                # === Отправка RC по UART ===
-                packed_channels = pack_channels(channels_old)
-                data_without_crc_old[3:25] = packed_channels
-                crc = crc8(data_without_crc_old[2:25])
-                updated_data = data_without_crc_old + [crc]
-                uart4.write(bytes(updated_data))
-
-                # Логирование
-                logging.debug(
-                    f"[RC] Mode: {'YAW' if use_yaw_mode else 'ROLL'} | "
-                    f"YAW_DIFF: {yaw_diff:.2f}° | "
-                    f"ROLL: {channels_old[0]}, PITCH: {channels_old[1]}, YAW: {channels_old[3]}"
-                )
-        except Exception as e:
-            logging.error(f"[RC Error] MAVLink read failed: {e}")
+        # Упаковка и отправка
+        packed_channels = pack_channels(channels_old)
+        data_without_crc_old[3:25] = packed_channels
+        crc = crc8(data_without_crc_old[2:25])
+        updated_data = data_without_crc_old + [crc]
+        uart4.write(bytes(updated_data))
 
     global is_thread_running
     is_thread_running = False
 
+
 # Функция для запуска потока обновления RC каналов
-def start_track_and_control_rc_channels_thread(channels_old, uart4, data_without_crc_old):
+def start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old):
     global is_thread_running  # нужно явно указать, что используем глобальную переменную
     if not is_thread_running:
         stop_event.clear()
         update_thread = threading.Thread(
-            target=track_and_control_rc_channels,
+            target=update_rc_channels_in_background,
             args=(channels_old, uart4, data_without_crc_old)
         )
         update_thread.daemon = True  # Поток завершится при завершении основного потока
         update_thread.start()
         is_thread_running = True  # Устанавливаем флаг после запуска
-    
+
 # Функция для обновления RC каналов
 def update_rc_channels(data, uart4):
     global channels_old, data_without_crc_old
@@ -252,16 +249,16 @@ def update_rc_channels(data, uart4):
             if data_without_crc_old is None:
                 data_without_crc_old = data_without_crc
             # Запускаем поток для обновления каналов в фоне
-            start_track_and_control_rc_channels_thread(channels_old, uart4, data_without_crc_old)
+            start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old)
 
     # Завершаем выполнение, если канал 11 меньше или равен 1700
     else:
+        stop_event.set()
         channels_old = None
         data_without_crc_old = None
-        print(f"Канал 11 меньше или равен 1700")
-        stop_event.set()  # Устанавливаем событие для остановки потока
+        #print(f"Канал 11 меньше или равен 1700")
         uart4.write(bytes(data))
-    
+            
 # Функция для форвардинга пакетов
 def uart_forwarder(uart3, uart4):
     global is_thread_running
@@ -270,7 +267,7 @@ def uart_forwarder(uart3, uart4):
     while True:
         try:
             # Чтение данных из uart3
-            data = uart3.read(256)
+            data = uart3.read(512)
             if not data:
                 continue
 
@@ -310,15 +307,13 @@ def uart_forwarder(uart3, uart4):
 
         except Exception as e:
             logging.error(f"❌ Ошибка при чтении данных с UART3: {e}")
-            # Можно добавить логику для повторной попытки чтения или выхода из цикла
-            time.sleep(1)  # Небольшая задержка перед следующей попыткой
 
 # Основная функция
 def main():
     logging.info("🚀 Запуск UART forwarder...")
 
-    uart3 = serial.Serial('/dev/ttyS3', 115200, timeout=1)  # Настройте нужную скорость
-    uart4 = serial.Serial('/dev/ttyS4', 420000, timeout=1)  # Настройте нужную скорость
+    uart3 = serial.Serial('/dev/ttyS3', 115200, timeout=0)  # Настройте нужную скорость
+    uart4 = serial.Serial('/dev/ttyS4', 420000, timeout=0)  # Настройте нужную скорость
 
     uart_forwarder(uart3, uart4)
 
