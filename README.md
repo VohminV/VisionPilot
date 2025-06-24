@@ -37,13 +37,13 @@
 2. Запустите захват и обработку видеопотока:
 
    ```bash
-   python CAMV2.py
+   python CAMFPV.py
    ```
 
 3. Запустите модуль передачи данных по UART:
 
    ```bash
-   python uartTOuartV2.py
+   python uartTOuart.py
    ```
 
 ---

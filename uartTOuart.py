@@ -149,7 +149,7 @@ def mavlink_listener():
                 current_altitude = msg.alt
 
 
-def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
+def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, desired_altitude):
     import json
     import logging
     import time
@@ -171,6 +171,8 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
     glob_offset_y = 0
 
     use_yaw_mode = False
+    pid = SmoothPIDController(kp=30.0, ki=2.0, kd=10.0, output_limits=(-400, 400))
+
 
     while not stop_event.is_set():
         try:
@@ -194,9 +196,18 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
         #ROLL
         roll_ticks = scale_offset_to_ticks(offset_x)
         channels_old[0] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + roll_ticks))  # ROLL
-        # PITCH
+        #PITCH
         pitch_ticks = scale_offset_to_ticks(offset_y)
         channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))  # PITCH
+
+        #Throttle
+        error = desired_altitude - current_altitude  # сравниваем с зафиксированной целью
+        correction = pid.update(error)
+
+        throttle_ticks = int(CENTER_TICKS + correction)
+        throttle_ticks = max(MIN_TICKS, min(MAX_TICKS, throttle_ticks))
+        channels_old[3] = throttle_ticks
+        
 
         # Упаковка и отправка
         packed_channels = pack_channels(channels_old)
@@ -210,13 +221,13 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
 
 
 # Функция для запуска потока обновления RC каналов
-def start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old):
+def start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old, desired_altitude):
     global is_thread_running  # нужно явно указать, что используем глобальную переменную
     if not is_thread_running:
         stop_event.clear()
         update_thread = threading.Thread(
             target=update_rc_channels_in_background,
-            args=(channels_old, uart4, data_without_crc_old)
+            args=(channels_old, uart4, data_without_crc_old, desired_altitude)
         )
         update_thread.daemon = True  # Поток завершится при завершении основного потока
         update_thread.start()
@@ -248,8 +259,9 @@ def update_rc_channels(data, uart4):
                 channels_old = channels.copy()
             if data_without_crc_old is None:
                 data_without_crc_old = data_without_crc
+            desired_altitude = current_altitude    
             # Запускаем поток для обновления каналов в фоне
-            start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old)
+            start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old, desired_altitude)
 
     # Завершаем выполнение, если канал 11 меньше или равен 1700
     else:
@@ -311,6 +323,9 @@ def uart_forwarder(uart3, uart4):
 # Основная функция
 def main():
     logging.info("🚀 Запуск UART forwarder...")
+    
+    # MAVLink в отдельном потоке
+    threading.Thread(target=mavlink_listener, daemon=True).start()
 
     uart3 = serial.Serial('/dev/ttyS3', 115200, timeout=0)  # Настройте нужную скорость
     uart4 = serial.Serial('/dev/ttyS4', 420000, timeout=0)  # Настройте нужную скорость
