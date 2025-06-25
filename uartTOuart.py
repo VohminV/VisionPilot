@@ -8,7 +8,6 @@ import logging
 import math
 import threading
 from pymavlink import mavutil
-
 # Настройка логгера
 logging.basicConfig(
     level=logging.INFO,  # Уровень логирования (можно DEBUG для более подробного вывода)
@@ -49,48 +48,7 @@ stop_event = threading.Event()
 is_thread_running = False
 
 current_altitude = 0.0
-
-### PID-КОНТРОЛЛЕР ###
-class SmoothPIDController:
-    def __init__(self, kp=30.0, ki=2.0, kd=10.0, integrator_limit=500.0, output_limits=(None, None)):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.integrator = 0.0
-        self.last_error = 0.0
-        self.last_time = None
-        self.integrator_limit = integrator_limit
-        self.output_min, self.output_max = output_limits
-
-    def reset(self):
-        self.integrator = 0.0
-        self.last_error = 0.0
-        self.last_time = None
-
-    def update(self, error, current_time=None):
-        now = current_time if current_time is not None else time.time()
-        if self.last_time is None:
-            dt = 0.05
-        else:
-            dt = now - self.last_time
-
-        p = self.kp * error
-        self.integrator += error * dt
-        self.integrator = max(-self.integrator_limit, min(self.integrator, self.integrator_limit))
-        i = self.ki * self.integrator
-        derivative = (error - self.last_error) / dt if dt > 0 else 0.0
-        d = self.kd * derivative
-
-        output = p + i + d
-        if self.output_min is not None:
-            output = max(self.output_min, output)
-        if self.output_max is not None:
-            output = min(self.output_max, output)
-
-        self.last_error = error
-        self.last_time = now
-        return output
-
+climb = 0.0
 
 def crc8(data):
     crc = 0
@@ -133,23 +91,7 @@ def extract_channels(data):
 
     return channels
 
-### MAVLINK ###
-def mavlink_listener():
-    global current_altitude
-    master = mavutil.mavlink_connection('/dev/ttyS1', baud=57600)
-    master.wait_heartbeat()
-    print("✅ MAVLink подключён")
-
-    while True:
-        msg = master.recv_match(type=['GLOBAL_POSITION_INT', 'VFR_HUD'], blocking=True)
-        if msg:
-            if msg.get_type() == 'GLOBAL_POSITION_INT':
-                current_altitude = msg.relative_alt / 1000.0
-            elif msg.get_type() == 'VFR_HUD':
-                current_altitude = msg.alt
-
-
-def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, desired_altitude):
+def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
     import json
     import logging
     import time
@@ -164,17 +106,62 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, 
     MAX_DEFLECTION_US = 300
     MAX_DEFLECTION_TICKS = int(MAX_DEFLECTION_US * 8 / 5)  # = 480
 
-    MAX_YAW_ANGLE = 45  # максимально допустимый угол yaw для управления
-    YAW_HYSTERESIS = 5  # гистерезис для стабильного переключения
+    # Масштабирование для int-вычислений
+    ALT_SCALE = 100    # высота в сотых метра
+    CLIMB_SCALE = 100  # скорость в сотых м/с
+
+    # PID коэффициенты под масштабирование
+    P = 400.0
+    D = 100.0
+    FF = 200.0
+
+    P_int = int(P / ALT_SCALE)       # 4
+    D_int = int(D / CLIMB_SCALE)     # 1
+    FF_int = int(FF / CLIMB_SCALE)   # 2
+
+    ### MAVLINK ###
+    master = mavutil.mavlink_connection('/dev/ttyS0', baud=57600)
+    master.wait_heartbeat()
+    logging.info("✅ MAVLink подключён")
+    
+    global current_altitude, climb
+
 
     glob_offset_x = 0
     glob_offset_y = 0
 
-    use_yaw_mode = False
-    pid = SmoothPIDController(kp=30.0, ki=2.0, kd=10.0, output_limits=(-400, 400))
+    # Ждём первое сообщение и фиксируем высоту как целевую
+    logging.info("⏳ Жду актуальную высоту...")
+    msg = master.recv_match(type='VFR_HUD', blocking=True)
+    if msg:
+        desired_altitude = msg.alt
+        logging.info(str(msg))  # полный вывод в лог
+    else:
+        desired_altitude = 0.0  # fallback
+    logging.info(f"📌 Зафиксированная высота: {desired_altitude:.2f} м")
 
+    # Переводим желаемую высоту в int с масштабом
+    desired_altitude_int = int(desired_altitude * ALT_SCALE)
 
+    initial_throttle = channels_old[2]
+    
     while not stop_event.is_set():
+        # 🛰️ Сначала читаем MAVLink-сообщение
+        msg = master.recv_match(type='VFR_HUD', blocking=False)
+        if msg:
+            current_altitude = msg.alt
+            climb = msg.climb
+
+            # Переводим в int с масштабом
+            current_altitude_int = int(current_altitude * ALT_SCALE)
+            climb_int = int(climb * CLIMB_SCALE)
+        else:
+            # Если сообщений нет, оставляем прежние значения
+            current_altitude_int = current_altitude_int if 'current_altitude_int' in locals() else desired_altitude_int
+            climb_int = climb_int if 'climb_int' in locals() else 0
+
+            
+        # 🧠 Загружаем оффсеты
         try:
             with open('offsets.json', 'r') as f:
                 offsets = json.load(f)
@@ -183,7 +170,7 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, 
         except:
             offset_x = glob_offset_x
             offset_y = glob_offset_y
-
+            
         glob_offset_x = offset_x
         glob_offset_y = offset_y
 
@@ -200,14 +187,22 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, 
         pitch_ticks = scale_offset_to_ticks(offset_y)
         channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))  # PITCH
 
-        #Throttle
-        error = desired_altitude - current_altitude  # сравниваем с зафиксированной целью
-        correction = pid.update(error)
+        # THROTTLE (возврат к зафиксированной высоте)
+        error = desired_altitude_int - current_altitude_int
 
-        throttle_ticks = int(CENTER_TICKS + correction)
-        throttle_ticks = max(MIN_TICKS, min(MAX_TICKS, throttle_ticks))
-        channels_old[3] = throttle_ticks
-        
+        p_out = P_int * error
+        d_out = -D_int * climb_int
+        ff_out = FF_int * climb_int
+
+        offset = p_out + d_out + ff_out
+        offset = max(-MAX_DEFLECTION_TICKS, min(MAX_DEFLECTION_TICKS, offset))
+
+        throttle = initial_throttle + offset
+        throttle = max(MIN_TICKS, min(MAX_TICKS, throttle))
+        channels_old[2] = throttle
+
+        logging.info(f"ALT: {current_altitude:.2f}, CL: {climb:+.2f}, E: {error/ALT_SCALE:.2f} m, T: {throttle}")
+
 
         # Упаковка и отправка
         packed_channels = pack_channels(channels_old)
@@ -221,13 +216,13 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old, 
 
 
 # Функция для запуска потока обновления RC каналов
-def start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old, desired_altitude):
+def start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old):
     global is_thread_running  # нужно явно указать, что используем глобальную переменную
     if not is_thread_running:
         stop_event.clear()
         update_thread = threading.Thread(
             target=update_rc_channels_in_background,
-            args=(channels_old, uart4, data_without_crc_old, desired_altitude)
+            args=(channels_old, uart4, data_without_crc_old)
         )
         update_thread.daemon = True  # Поток завершится при завершении основного потока
         update_thread.start()
@@ -259,9 +254,8 @@ def update_rc_channels(data, uart4):
                 channels_old = channels.copy()
             if data_without_crc_old is None:
                 data_without_crc_old = data_without_crc
-            desired_altitude = current_altitude    
             # Запускаем поток для обновления каналов в фоне
-            start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old, desired_altitude)
+            start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old)
 
     # Завершаем выполнение, если канал 11 меньше или равен 1700
     else:
@@ -324,9 +318,6 @@ def uart_forwarder(uart3, uart4):
 def main():
     logging.info("🚀 Запуск UART forwarder...")
     
-    # MAVLink в отдельном потоке
-    threading.Thread(target=mavlink_listener, daemon=True).start()
-
     uart3 = serial.Serial('/dev/ttyS3', 115200, timeout=0)  # Настройте нужную скорость
     uart4 = serial.Serial('/dev/ttyS4', 420000, timeout=0)  # Настройте нужную скорость
 
