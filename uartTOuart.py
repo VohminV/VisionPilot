@@ -120,12 +120,16 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
     FF_int = int(FF / CLIMB_SCALE)   # 2
 
     ### MAVLINK ###
-    master = mavutil.mavlink_connection('/dev/ttyS0', baud=57600)
+    master = mavutil.mavlink_connection('/dev/ttyS0', baud=115200)
     master.wait_heartbeat()
     logging.info("✅ MAVLink подключён")
     
     global current_altitude, climb
 
+    def heading_diff(desired, current):
+        # Разница направления от current к desired (желательному)
+        diff = (desired - current + 540) % 360 - 180
+        return diff  # В диапазоне [-180, 180]
 
     glob_offset_x = 0
     glob_offset_y = 0
@@ -135,15 +139,20 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
     msg = master.recv_match(type='VFR_HUD', blocking=True)
     if msg:
         desired_altitude = msg.alt
+        desired_heading = msg.heading
         logging.info(str(msg))  # полный вывод в лог
     else:
         desired_altitude = 0.0  # fallback
-    logging.info(f"📌 Зафиксированная высота: {desired_altitude:.2f} м")
 
     # Переводим желаемую высоту в int с масштабом
     desired_altitude_int = int(desired_altitude * ALT_SCALE)
 
+    # Инициализация переменных
+    current_altitude_int = desired_altitude_int
+    current_heading = desired_heading
+
     initial_throttle = channels_old[2]
+    initial_yaw = channels_old[3]
     
     while not stop_event.is_set():
         # 🛰️ Сначала читаем MAVLink-сообщение
@@ -151,13 +160,14 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
         if msg:
             current_altitude = msg.alt
             climb = msg.climb
-
+            current_heading = msg.heading
             # Переводим в int с масштабом
             current_altitude_int = int(current_altitude * ALT_SCALE)
             climb_int = int(climb * CLIMB_SCALE)
         else:
             # Если сообщений нет, оставляем прежние значения
             current_altitude_int = current_altitude_int if 'current_altitude_int' in locals() else desired_altitude_int
+            current_heading = current_heading if 'current_heading' in locals() else desired_heading
             climb_int = climb_int if 'climb_int' in locals() else 0
 
             
@@ -203,7 +213,27 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
 
         logging.info(f"ALT: {current_altitude:.2f}, CL: {climb:+.2f}, E: {error/ALT_SCALE:.2f} m, T: {throttle}")
 
+        #YAW
+        # Вычисляем отклонение
+        yaw_error = max(-45, min(45, heading_diff(desired_heading, current_heading)))
 
+        if abs(yaw_error) > 10:
+            # Преобразуем yaw_error в диапазон -1..1
+            yaw_normalized = max(-1.0, min(1.0, yaw_error / 45.0))  # 45° = макс. поворот
+
+            # Переводим в CRSF ticks
+            yaw_ticks = int(yaw_normalized * MAX_DEFLECTION_TICKS)
+            yaw_channel = CENTER_TICKS + yaw_ticks
+
+            # Ограничиваем CRSF значение
+            yaw_channel = max(MIN_TICKS, min(MAX_TICKS, yaw_channel))
+
+            channels_old[3] = yaw_channel  # Или другой индекс, если yaw на другом канале
+
+            logging.info(f"Yaw correction: Δ={yaw_error:.1f}°, CRSF={yaw_channel}")
+        else:
+            # Вернуть yaw в центр
+            channels_old[3] = CENTER_TICKS#initial_yaw
         # Упаковка и отправка
         packed_channels = pack_channels(channels_old)
         data_without_crc_old[3:25] = packed_channels
