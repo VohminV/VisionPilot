@@ -1,6 +1,8 @@
 # VisionPilot
 
 ![Иллюстрация к проекту](https://github.com/VohminV/VisionPilot/blob/main/Example.png)
+![Схема подключения](https://github.com/VohminV/VisionPilot/blob/main/Schematic_VisionPilot_2025-06-26.png)
+![Распиновка платы](https://github.com/VohminV/VisionPilot/blob/main/pi5-23.png)
 
 Проект VisionPilot — это система автопилота для одноплатного компьютера Orange Pi, использующая компьютерное зрение и протокол CRSF для управления дистанционным управлением. Основные задачи проекта — захват и обработка видеопотока, детекция объектов с помощью модели YOLO и передача управляющих команд через UART.
 
