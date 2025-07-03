@@ -1,48 +1,55 @@
 #include <GY87.h>
 #include <Arduino.h>
 
-// Khởi tạo GY87 với SDA = GPIO21, SCL = GPIO22
+// Инициализация GY87 (SDA = GPIO21, SCL = GPIO22)
 GY87 sensor(21, 22);
 
 #define LED_PIN 2
-bool blinkState = false;
 
-// Функция расчёта высоты (в метрах) из давления (Па) и температуры (°C)
+// Структура для передачи данных по Serial
+struct SensorData {
+  float altitude;
+  float headingX;
+};
+
+// Расчёт высоты по давлению и температуре
 float calcAltitude(float pressure, float temperature) {
-  const float P0 = 101325.0;   // давление на уровне моря в Па
-  float tempK = temperature + 273.15;  // °C -> Кельвин
-  float altitude = (tempK / 0.0065) * (1 - pow(pressure / P0, 0.1903));
-  return altitude;
+  const float P0 = 101325.0;
+  float tempK = temperature + 273.15;
+  return (tempK / 0.0065) * (1 - pow(pressure / P0, 0.1903));
+}
+
+// Считывание данных с датчиков
+SensorData readSensor() {
+  SensorData data = {0.0, 0.0};
+
+  if (sensor.read()) {
+    data.altitude = calcAltitude(sensor.pressure, sensor.temperature);
+    data.headingX = sensor.heading;
+  }
+
+  return data;
+}
+
+// Отправка структуры как бинарных данных по Serial
+void sendSensorDataSerial(const SensorData &data) {
+  Serial.write((const uint8_t*)&data, sizeof(SensorData));
 }
 
 void setup() {
-  Serial.begin(115200);
-  delay(1000);
-
   pinMode(LED_PIN, OUTPUT);
 
-  if (sensor.begin()) {
-    Serial.println("GY-87 инициализирован успешно!");
-  } else {
-    Serial.println("Ошибка инициализации GY-87!");
-    while (1);
-  }
-
-  Serial.println("heading\taltitude");  // заголовки для Serial Plotter
+  Serial.begin(115200);
+  sensor.begin();
 }
 
 void loop() {
-  if (sensor.read()) {
-    float altitude = calcAltitude(sensor.pressure, sensor.temperature);
+  SensorData data = readSensor();
 
-    Serial.print(sensor.heading); Serial.print("\t");
-    Serial.println(altitude);
-  } else {
-    Serial.println("Ошибка чтения данных!");
+  if (data.altitude != 0.0 || data.headingX != 0.0) {
+    sendSensorDataSerial(data);
   }
 
-  blinkState = !blinkState;
-  digitalWrite(LED_PIN, blinkState);
-
-  delay(100);  // обновление 10 раз в секунду
+  digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+  delay(100);
 }
