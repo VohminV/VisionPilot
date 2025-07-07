@@ -18,7 +18,6 @@ logging.basicConfig(
     ]
 )
 
-
 crc8tab = [
     0x00, 0xD5, 0x7F, 0xAA, 0xFE, 0x2B, 0x81, 0x54, 0x29, 0xFC, 0x56, 0x83, 0xD7, 0x02, 0xA8, 0x7D,
     0x52, 0x87, 0x2D, 0xF8, 0xAC, 0x79, 0xD3, 0x06, 0x7B, 0xAE, 0x04, 0xD1, 0x85, 0x50, 0xFA, 0x2F,
@@ -46,16 +45,60 @@ correction_active = False
 stop_event = threading.Event()
 # Флаг для проверки, запущен ли поток
 is_thread_running = False
+is_calibrating = False
 
 current_altitude = 0.0
 climb = 0.0
 
+from smbus import SMBus
+bus = SMBus(5)
+    
 def crc8(data):
     crc = 0
     for byte in data:
         crc = crc8tab[crc ^ byte]
     return crc
-    
+
+def calibrate_qmc5883l(duration_sec=30, delay=0.01):
+    global bus
+    QMC5883L_ADDR = 0x0D
+
+    min_x = float('inf')
+    max_x = float('-inf')
+    min_y = float('inf')
+    max_y = float('-inf')
+    min_z = float('inf')
+    max_z = float('-inf')
+
+    start_time = time.time()
+    while time.time() - start_time < duration_sec:
+        data = bus.read_i2c_block_data(QMC5883L_ADDR, 0x00, 6)
+        mag_x = (data[1] << 8) | data[0]
+        mag_y = (data[3] << 8) | data[2]
+        mag_z = (data[5] << 8) | data[4]
+
+        if mag_x >= 32768: mag_x -= 65536
+        if mag_y >= 32768: mag_y -= 65536
+        if mag_z >= 32768: mag_z -= 65536
+
+        min_x = min(min_x, mag_x)
+        max_x = max(max_x, mag_x)
+        min_y = min(min_y, mag_y)
+        max_y = max(max_y, mag_y)
+        min_z = min(min_z, mag_z)
+        max_z = max(max_z, mag_z)
+
+        time.sleep(delay)
+
+    offset_x = -((max_x + min_x) // 2)
+    offset_y = -((max_y + min_y) // 2)
+    offset_z = -((max_z + min_z) // 2)
+
+    with open('mag_offsets.json', 'w') as f:
+        json.dump({"x": offset_x, "y": offset_y, "z": offset_z}, f)
+
+    print(f"[✔] Калибровка QMC5883L завершена. Смещения: x={offset_x}, y={offset_y}, z={offset_z}")
+
 # Function to pack channels into the CRSF payload format (16 channels, 11 bits each)
 def pack_channels(channel_data):
     # channel data: array of 16 integers
@@ -95,155 +138,131 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
     import json
     import logging
     import time
+    import math
 
-    # Параметры CRSF
+    global bus
+
+    # Адреса датчиков
+    QMC5883L_ADDR = 0x0D
+    MAGNETIC_DECLINATION = 8.2667
+    # CRSF параметры
     CENTER_TICKS = 992
     MIN_TICKS = 172
     MAX_TICKS = 1811
 
     FRAME_SIZE = 320
-    MAX_OFFSET_PX = FRAME_SIZE // 2  # 160 пикселей
+    MAX_OFFSET_PX = FRAME_SIZE // 2
     MAX_DEFLECTION_US = 300
-    MAX_DEFLECTION_TICKS = int(MAX_DEFLECTION_US * 8 / 5)  # = 480
+    MAX_DEFLECTION_TICKS = int(MAX_DEFLECTION_US * 8 / 5)
 
-    # Масштабирование для int-вычислений
-    ALT_SCALE = 100    # высота в сотых метра
-    CLIMB_SCALE = 100  # скорость в сотых м/с
+    ALT_SCALE = 100
+    CLIMB_SCALE = 100
 
-    # PID коэффициенты под масштабирование
-    P = 400.0
-    D = 100.0
-    FF = 200.0
+    P_int = 4   # 400 / 100
+    D_int = 1   # 100 / 100
+    FF_int = 2  # 200 / 100
 
-    P_int = int(P / ALT_SCALE)       # 4
-    D_int = int(D / CLIMB_SCALE)     # 1
-    FF_int = int(FF / CLIMB_SCALE)   # 2
+    def calculate_heading():
+        # Загружаем калибровочные смещения
+        try:
+            with open('mag_offsets.json', 'r') as f:
+                offsets = json.load(f)
+                mag_offset_x = offsets.get('x', 0)
+                mag_offset_y = offsets.get('y', 0)
+        except Exception:
+            mag_offset_x = 0
+            mag_offset_y = 0
 
-    ### MAVLINK ###
-    master = mavutil.mavlink_connection('/dev/ttyS0', baud=115200)
-    master.wait_heartbeat()
-    logging.info("✅ MAVLink подключён")
-    
-    global current_altitude, climb
+        # Читаем 6 байт данных магнитометра
+        data = bus.read_i2c_block_data(QMC5883L_ADDR, 0x00, 6)
+        mag_x = (data[1] << 8) | data[0]
+        mag_y = (data[3] << 8) | data[2]
+
+        # Преобразуем в signed int
+        if mag_x >= 32768: mag_x -= 65536
+        if mag_y >= 32768: mag_y -= 65536
+
+        # Применяем калибровку
+        mag_x += mag_offset_x
+        mag_y += mag_offset_y
+
+        # Вычисляем азимут (heading) в градусах
+        heading = math.atan2(mag_y, mag_x) * 180 / math.pi
+        if heading < 0:
+            heading += 360
+
+        # Применяем магнитное склонение (восточное → +)
+        heading += MAGNETIC_DECLINATION
+        if heading >= 360:
+            heading -= 360
+
+        return heading
 
     def heading_diff(desired, current):
-        # Разница направления от current к desired (желательному)
-        diff = (desired - current + 540) % 360 - 180
-        return diff  # В диапазоне [-180, 180]
+        return (desired - current + 540) % 360 - 180
 
-    glob_offset_x = 0
-    glob_offset_y = 0
+    # 🌐 Начальные значения
+    desired_heading = calculate_heading()
 
-    # Ждём первое сообщение и фиксируем высоту как целевую
-    logging.info("⏳ Жду актуальную высоту...")
-    msg = master.recv_match(type='VFR_HUD', blocking=True)
-    if msg:
-        desired_altitude = msg.alt
-        desired_heading = msg.heading
-        logging.info(str(msg))  # полный вывод в лог
-    else:
-        desired_altitude = 0.0  # fallback
-
-    # Переводим желаемую высоту в int с масштабом
-    desired_altitude_int = int(desired_altitude * ALT_SCALE)
-
-    # Инициализация переменных
-    current_altitude_int = desired_altitude_int
-    current_heading = desired_heading
-
-    initial_throttle = channels_old[2]
+    #initial_throttle = channels_old[2]
     initial_yaw = channels_old[3]
-    
-    while not stop_event.is_set():
-        # 🛰️ Сначала читаем MAVLink-сообщение
-        msg = master.recv_match(type='VFR_HUD', blocking=False)
-        if msg:
-            current_altitude = msg.alt
-            climb = msg.climb
-            current_heading = msg.heading
-            # Переводим в int с масштабом
-            current_altitude_int = int(current_altitude * ALT_SCALE)
-            climb_int = int(climb * CLIMB_SCALE)
-        else:
-            # Если сообщений нет, оставляем прежние значения
-            current_altitude_int = current_altitude_int if 'current_altitude_int' in locals() else desired_altitude_int
-            current_heading = current_heading if 'current_heading' in locals() else desired_heading
-            climb_int = climb_int if 'climb_int' in locals() else 0
 
-            
-        # 🧠 Загружаем оффсеты
+    while not stop_event.is_set():
+        # Чтение сенсоров
+        current_heading = calculate_heading()
+
         try:
             with open('offsets.json', 'r') as f:
                 offsets = json.load(f)
                 offset_x = offsets.get('x', 0)
                 offset_y = offsets.get('y', 0)
         except:
-            offset_x = glob_offset_x
-            offset_y = glob_offset_y
-            
-        glob_offset_x = offset_x
-        glob_offset_y = offset_y
+            offset_x = 0
+            offset_y = 0
 
         offset_x = max(-MAX_OFFSET_PX, min(offset_x, MAX_OFFSET_PX))
         offset_y = max(-MAX_OFFSET_PX, min(offset_y, MAX_OFFSET_PX))
 
         def scale_offset_to_ticks(offset_px):
             return int(offset_px * MAX_DEFLECTION_TICKS / MAX_OFFSET_PX)
-        
-        #ROLL
+
         roll_ticks = scale_offset_to_ticks(offset_x)
-        channels_old[0] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + roll_ticks))  # ROLL
-        #PITCH
         pitch_ticks = scale_offset_to_ticks(offset_y)
-        channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))  # PITCH
 
-        # THROTTLE (возврат к зафиксированной высоте)
+        channels_old[0] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + roll_ticks))
+        channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))
+        """
         error = desired_altitude_int - current_altitude_int
-
         p_out = P_int * error
         d_out = -D_int * climb_int
         ff_out = FF_int * climb_int
-
         offset = p_out + d_out + ff_out
         offset = max(-MAX_DEFLECTION_TICKS, min(MAX_DEFLECTION_TICKS, offset))
 
         throttle = initial_throttle + offset
         throttle = max(MIN_TICKS, min(MAX_TICKS, throttle))
         channels_old[2] = throttle
+        """
+        yaw_error = max(-30, min(30, heading_diff(desired_heading, current_heading)))
 
-        logging.info(f"ALT: {current_altitude:.2f}, CL: {climb:+.2f}, E: {error/ALT_SCALE:.2f} m, T: {throttle}")
-
-        #YAW
-        # Вычисляем отклонение
-        yaw_error = max(-45, min(45, heading_diff(desired_heading, current_heading)))
-
-        if abs(yaw_error) > 10:
-            # Преобразуем yaw_error в диапазон -1..1
-            yaw_normalized = max(-1.0, min(1.0, yaw_error / 45.0))  # 45° = макс. поворот
-
-            # Переводим в CRSF ticks
+        if abs(yaw_error) > 15:
+            yaw_normalized = max(-1.0, min(1.0, yaw_error / 30.0))
             yaw_ticks = int(yaw_normalized * MAX_DEFLECTION_TICKS)
-            yaw_channel = CENTER_TICKS + yaw_ticks
-
-            # Ограничиваем CRSF значение
-            yaw_channel = max(MIN_TICKS, min(MAX_TICKS, yaw_channel))
-
-            channels_old[3] = yaw_channel  # Или другой индекс, если yaw на другом канале
-
-            logging.info(f"Yaw correction: Δ={yaw_error:.1f}°, CRSF={yaw_channel}")
+            yaw_channel = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + yaw_ticks))
+            channels_old[3] = yaw_channel
         else:
-            # Вернуть yaw в центр
-            channels_old[3] = CENTER_TICKS#initial_yaw
-        # Упаковка и отправка
+            channels_old[3] = CENTER_TICKS
+    
         packed_channels = pack_channels(channels_old)
         data_without_crc_old[3:25] = packed_channels
         crc = crc8(data_without_crc_old[2:25])
         updated_data = data_without_crc_old + [crc]
         uart4.write(bytes(updated_data))
 
+        #logging.info(f"HEAD: {current_heading:.1f}, ΔH={yaw_error:.1f}°")
+
     global is_thread_running
     is_thread_running = False
-
 
 # Функция для запуска потока обновления RC каналов
 def start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old):
@@ -258,27 +277,31 @@ def start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old):
         update_thread.start()
         is_thread_running = True  # Устанавливаем флаг после запуска
 
+def calibrate_thread():
+    global is_calibrating
+    is_calibrating = True
+    calibrate_qmc5883l(duration_sec=30, delay=0.01)
+    is_calibrating = False
+    
 # Функция для обновления RC каналов
 def update_rc_channels(data, uart4):
-    global channels_old, data_without_crc_old
+    global channels_old, data_without_crc_old, is_thread_running, is_calibrating
 
     if len(data) < 26:
-        print(f"❌ Недостаточно данных: {len(data)} байт, нужно минимум 26.")
+        #print(f"❌ Недостаточно данных: {len(data)} байт, нужно минимум 26.")
         return data
 
     data_without_crc = data[:-1]  # Без последнего байта CRC
     channels = extract_channels(data_without_crc[3:25])
 
     if len(channels) < 16:
-        print(f"❌ Недостаточно каналов для обновления. Найдено {len(channels)} каналов.")
+        #print(f"❌ Недостаточно каналов для обновления. Найдено {len(channels)} каналов.")
         return
     
-    print(f"Канал 11: {channels[11]}")  # Активность канала для контроля
+    #print(f"Канал 11: {channels[11]}")  # Активность канала для контроля
 
     # Если канал 11 больше 1700 и поток еще не запущен, запускаем его
     if channels[11] > 1700:
-        global is_thread_running
-
         if not is_thread_running:  # Если поток еще не запущен
             if channels_old is None:
                 channels_old = channels.copy()
@@ -286,7 +309,9 @@ def update_rc_channels(data, uart4):
                 data_without_crc_old = data_without_crc
             # Запускаем поток для обновления каналов в фоне
             start_update_rc_channels_thread(channels_old, uart4, data_without_crc_old)
-
+    elif channels[3] > 1700 and channels[0] < 300 and not is_calibrating:
+        t = threading.Thread(target=calibrate_thread)
+        t.start()
     # Завершаем выполнение, если канал 11 меньше или равен 1700
     else:
         stop_event.set()
@@ -313,7 +338,7 @@ def uart_forwarder(uart3, uart4):
                 try:
                     # Проверяем начало пакета
                     if packet_buffer[0] != 0xC8:
-                        print(f"❌ Неправильный байт начала пакета: {packet_buffer[0]:02x}")
+                        #print(f"❌ Неправильный байт начала пакета: {packet_buffer[0]:02x}")
                         packet_buffer.pop(0)
                         continue
 
@@ -321,20 +346,20 @@ def uart_forwarder(uart3, uart4):
                     print(f"Ожидаемая длина пакета: {length}")
 
                     if len(packet_buffer) < length + 2:
-                        print("❌ Пакет неполный, ожидаем дополнительные данные...")
+                        #print("❌ Пакет неполный, ожидаем дополнительные данные...")
                         break
 
                     packet = packet_buffer[:length + 2]
                     packet_buffer = packet_buffer[length + 2:]
 
-                    print(f"Получен пакет: {' '.join(f'{x:02x}' for x in packet)}")
+                    #print(f"Получен пакет: {' '.join(f'{x:02x}' for x in packet)}")
 
                     if packet[2] == 0x16:  # Проверка на тип пакета
                         update_rc_channels(packet, uart4)
                     else:
                         if not is_thread_running:
                             uart4.write(bytes(packet))
-                        print(f"Записано байтов в UART4: {len(packet)}")
+                        #print(f"Записано байтов в UART4: {len(packet)}")
 
                 except Exception as e:
                     logging.error(f"❌ Ошибка при обработке пакета: {e}")
