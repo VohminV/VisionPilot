@@ -9,9 +9,10 @@ import math
 logging.basicConfig(filename='anchor_tracking.log', level=logging.INFO,
                     format='%(asctime)s - %(message)s')
 
-FLAG_PATH = 'tracking_enabled.flag'
-cv2.namedWindow("Anchor Optical Flow Tracker", cv2.WND_PROP_FULLSCREEN)
-cv2.setWindowProperty("Anchor Optical Flow Tracker", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+FLAG_PATH = '/home/orangepi/Documents/YOLO/tracking_enabled.flag'
+
+#cv2.namedWindow("Anchor Optical Flow Tracker", cv2.WND_PROP_FULLSCREEN)
+#cv2.setWindowProperty("Anchor Optical Flow Tracker", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
 def set_tracking(enabled: bool):
     tmp_path = FLAG_PATH + '.tmp'
@@ -38,20 +39,26 @@ def t_tracking_flag():
     #logging.info(f"Tracking {'enabled' if not current else 'disabled'} via toggle")
 
 def save_offset(avg_x, avg_y, angle):
-    # Передаем угол 0 если abs(angle) <= 15
-    angle_to_save = angle if abs(angle) > 15 else 0
-    data = {'x': avg_x, 'y': avg_y, 'angle': angle_to_save}
-    tmp_filename = 'offsets_tmp.json'
-    final_filename = 'offsets.json'
+    data = {
+        'x': float(avg_x),
+        'y': float(avg_y),
+        'angle': float(angle)
+    }
+    tmp_filename = '/home/orangepi/Documents/YOLO/offsets_tmp.json'
+    final_filename = '/home/orangepi/Documents/YOLO/offsets.json'
     try:
         with open(tmp_filename, 'w') as f:
             json.dump(data, f)
         os.replace(tmp_filename, final_filename)
+        logging.info(f"Saved offsets: {data}")
     except Exception as e:
         logging.error(f"Error saving offsets: {e}")
 
+        
 def main():
     cap = cv2.VideoCapture(0)
+    cv2.namedWindow("Anchor Optical Flow Tracker", cv2.WND_PROP_FULLSCREEN)
+    cv2.setWindowProperty("Anchor Optical Flow Tracker", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     if not cap.isOpened():
         print("Ошибка: не удалось открыть камеру")
         return
@@ -158,21 +165,17 @@ def main():
             method=cv2.RANSAC, ransacReprojThreshold=3, maxIters=2000)
 
         angle = prev_angle
-        if H is not None and inliers is not None and np.count_nonzero(inliers) > 10:
+        if H is not None and inliers is not None and np.count_nonzero(inliers) > 5:
             raw_angle_rad = math.atan2(H[1, 0], H[0, 0])
             raw_angle = math.degrees(raw_angle_rad)
 
             angle_diff = ((raw_angle - prev_angle + 180) % 360) - 180
-            if abs(angle_diff) < 45:
-                angle = prev_angle + alpha * angle_diff
-                if angle > 180:
-                    angle -= 360
-                elif angle < -180:
-                    angle += 360
-                prev_angle = angle
-            else:
-                angle = prev_angle
-
+            angle = prev_angle + alpha * angle_diff
+            if angle > 180:
+                angle -= 360
+            elif angle < -180:
+                angle += 360
+            prev_angle = angle
         dxs = good_new[:, 0] - good_old[:, 0]
         dys = good_new[:, 1] - good_old[:, 1]
         avg_dx = np.mean(dxs)

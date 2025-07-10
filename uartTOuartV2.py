@@ -19,13 +19,13 @@ logging.basicConfig(
     ]
 )
 
+FLAG_PATH = '/home/orangepi/Documents/YOLO/tracking_enabled.flag'
 def set_tracking(enabled: bool):
-    flag_path = '/tmp/tracking_enabled.flag'
-    tmp_path = flag_path + '.tmp'
+    tmp_path = FLAG_PATH + '.tmp'
     try:
         with open(tmp_path, 'w') as f:
             f.write('1' if enabled else '0')
-        os.replace(tmp_path, flag_path)
+        os.replace(tmp_path, FLAG_PATH)
     except Exception as e:
         print(f"Ошибка записи флага: {e}")
 
@@ -111,10 +111,17 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
     MIN_TICKS = 172
     MAX_TICKS = 1811
     
+    # Величина мёртвой зоны — до какого угла yaw не двигаем
+    DEADZONE_ANGLE = 3  # например, 3°
+    
     angle = 0
     
-    FRAME_SIZE = 640
-    MAX_OFFSET_PX = FRAME_SIZE // 2
+    FRAME_WIDTH = 720
+    FRAME_HEIGHT = 576
+
+    MAX_OFFSET_X_PX = FRAME_WIDTH // 2     # 360
+    MAX_OFFSET_Y_PX = FRAME_HEIGHT // 2    # 288
+
     MAX_DEFLECTION_US = 300
     MAX_DEFLECTION_TICKS = int(MAX_DEFLECTION_US * 8 / 5)
 
@@ -127,9 +134,6 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
 
     def heading_diff(desired, current):
         return (desired - current + 540) % 360 - 180
-
-    # 🌐 Начальные значения
-    desired_heading = calculate_heading()
 
     initial_throttle = channels_old[2]
     initial_yaw = channels_old[3]
@@ -145,20 +149,26 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
         except:
             offset_x = 0
             offset_y = 0
+            angle = 0
 
-        offset_x = max(-MAX_OFFSET_PX, min(offset_x, MAX_OFFSET_PX))
-        offset_y = max(-MAX_OFFSET_PX, min(offset_y, MAX_OFFSET_PX))
+        # Ограничиваем смещение
+        offset_x = max(-MAX_OFFSET_X_PX, min(offset_x, MAX_OFFSET_X_PX))
+        offset_y = max(-MAX_OFFSET_Y_PX, min(offset_y, MAX_OFFSET_Y_PX))
 
-        def scale_offset_to_ticks(offset_px):
-            return int(offset_px * MAX_DEFLECTION_TICKS / MAX_OFFSET_PX)
+        # Масштабируем в тики (по отдельности для X и Y)
+        def scale_offset_x_to_ticks(offset_px):
+            return int(offset_px * MAX_DEFLECTION_TICKS / MAX_OFFSET_X_PX)
 
-        roll_ticks = scale_offset_to_ticks(offset_x)
-        pitch_ticks = scale_offset_to_ticks(offset_y)
+        def scale_offset_y_to_ticks(offset_px):
+            return int(offset_px * MAX_DEFLECTION_TICKS / MAX_OFFSET_Y_PX)
+    
+        roll_ticks = scale_offset_x_to_ticks(offset_x)
+        pitch_ticks = scale_offset_y_to_ticks(offset_y)
 
         channels_old[0] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + roll_ticks))
         channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))
 
-        if abs(angle) > 15:  # мёртвая зона, чтобы не дёргался на шум
+        if angle < -5 or angle > 5: # мёртвая зона, чтобы не дёргался на шум
             yaw_error = -angle  # компенсируем поворот (если угол > 0, надо крутить вправо)
     
             yaw_error_limited = max(-30, min(30, yaw_error))  # ограничим диапазон
@@ -297,7 +307,7 @@ def uart_forwarder(uart3, uart4):
 # Основная функция
 def main():
     logging.info("🚀 Запуск UART forwarder...")
-    
+    set_tracking(False)
     uart3 = serial.Serial('/dev/ttyS3', 115200, timeout=0)  # Настройте нужную скорость
     uart4 = serial.Serial('/dev/ttyS4', 420000, timeout=0)  # Настройте нужную скорость
 
