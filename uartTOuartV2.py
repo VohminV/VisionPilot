@@ -169,7 +169,7 @@ def update_rc_channels_in_background(channels_old, uart4, data_without_crc_old):
         channels_old[1] = max(MIN_TICKS, min(MAX_TICKS, CENTER_TICKS + pitch_ticks))
 
         if angle < -5 or angle > 5: # мёртвая зона, чтобы не дёргался на шум
-            yaw_error = -angle  # компенсируем поворот (если угол > 0, надо крутить вправо)
+            yaw_error = angle  # компенсируем поворот (если угол > 0, надо крутить вправо)
     
             yaw_error_limited = max(-30, min(30, yaw_error))  # ограничим диапазон
             yaw_normalized = yaw_error_limited / 30.0         # [-1.0 ... 1.0]
@@ -236,7 +236,7 @@ def update_rc_channels(data, uart4):
         set_tracking(False)
 
         # Вот здесь добавляем логику сохранения газа:
-        if throttle_start is not None:
+        if throttle_start is not None and throttle_start > channels[2] :
             # Обновляем channels так, чтобы throttle не упал ниже стартового
             channels[2] = max(channels[2], throttle_start)
 

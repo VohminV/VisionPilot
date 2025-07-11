@@ -11,9 +11,6 @@ logging.basicConfig(filename='anchor_tracking.log', level=logging.INFO,
 
 FLAG_PATH = '/home/orangepi/Documents/YOLO/tracking_enabled.flag'
 
-#cv2.namedWindow("Anchor Optical Flow Tracker", cv2.WND_PROP_FULLSCREEN)
-#cv2.setWindowProperty("Anchor Optical Flow Tracker", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-
 def set_tracking(enabled: bool):
     tmp_path = FLAG_PATH + '.tmp'
     try:
@@ -36,7 +33,6 @@ def is_tracking_enabled():
 def t_tracking_flag():
     current = is_tracking_enabled()
     set_tracking(not current)
-    #logging.info(f"Tracking {'enabled' if not current else 'disabled'} via toggle")
 
 def save_offset(avg_x, avg_y, angle):
     data = {
@@ -50,11 +46,24 @@ def save_offset(avg_x, avg_y, angle):
         with open(tmp_filename, 'w') as f:
             json.dump(data, f)
         os.replace(tmp_filename, final_filename)
-        logging.info(f"Saved offsets: {data}")
     except Exception as e:
         logging.error(f"Error saving offsets: {e}")
 
-        
+# Инициализация фильтра Калмана для [dx, dy, angle]
+def init_kalman():
+    kf = cv2.KalmanFilter(3, 3)  # 3 состояния, 3 измерения
+    
+    kf.transitionMatrix = np.eye(3, dtype=np.float32)  # состояние без изменений по умолчанию
+    kf.measurementMatrix = np.eye(3, dtype=np.float32)
+    
+    kf.processNoiseCov = np.eye(3, dtype=np.float32) * 1e-4  # шум модели (настройка)
+    kf.measurementNoiseCov = np.eye(3, dtype=np.float32) * 1e-2  # шум измерений (настройка)
+    
+    kf.statePre = np.zeros((3,1), dtype=np.float32)
+    kf.statePost = np.zeros((3,1), dtype=np.float32)
+    
+    return kf
+
 def main():
     cap = cv2.VideoCapture(0)
     cv2.namedWindow("Anchor Optical Flow Tracker", cv2.WND_PROP_FULLSCREEN)
@@ -78,6 +87,8 @@ def main():
 
     alpha = 0.3  # коэффициент сглаживания угла
 
+    kalman = init_kalman()
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -90,13 +101,12 @@ def main():
         gray = cv2.cvtColor(frame_proc, cv2.COLOR_BGR2GRAY)
 
         if not tracking_enabled:
-            #if tracking_initialized:
-                #logging.info("Tracking disabled, resetting state")
             first_gray = None
             first_pts = None
             tracking_initialized = False
             accumulated_offset = np.array([0.0, 0.0])
             prev_angle = 0.0
+            kalman = init_kalman()  # сброс фильтра Калмана
 
             vis = frame_proc.copy()
             cv2.putText(vis, "Tracking disabled (press 't' to enable)", (10, 30),
@@ -105,7 +115,6 @@ def main():
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
-                #logging.info("Выход по клавише 'q'")
                 break
             elif key == ord('t'):
                 t_tracking_flag()
@@ -119,7 +128,7 @@ def main():
                 tracking_initialized = True
                 accumulated_offset = np.array([0.0, 0.0])
                 prev_angle = 0.0
-                #logging.info("Tracking initialized with new anchor points")
+                kalman = init_kalman()
             else:
                 vis = frame_proc.copy()
                 cv2.putText(vis, "No keypoints for initialization", (10, 30),
@@ -132,25 +141,22 @@ def main():
                     t_tracking_flag()
                 continue
 
-        # Вычисляем оптический поток от зафиксированных точек первого кадра к текущему
         next_pts, status, error = cv2.calcOpticalFlowPyrLK(first_gray, gray, first_pts, None, **lk_params)
 
         if next_pts is None or status is None:
-            # Поток не найден, сбрасываем трекинг
             logging.warning("Оптический поток не найден, сброс трекинга")
             first_gray = None
             first_pts = None
             tracking_initialized = False
             accumulated_offset = np.array([0.0, 0.0])
             prev_angle = 0.0
+            kalman = init_kalman()
             continue
 
         status = status.flatten()
-        error = error.flatten() if error is not None else np.array([])
-
         good_new = next_pts[status == 1].reshape(-1, 2)
         good_old = first_pts[status == 1].reshape(-1, 2)
-        
+
         if len(good_new) < 10:
             logging.warning("Слишком мало отслеживаемых точек, сброс трекинга")
             first_gray = None
@@ -158,6 +164,7 @@ def main():
             tracking_initialized = False
             accumulated_offset = np.array([0.0, 0.0])
             prev_angle = 0.0
+            kalman = init_kalman()
             continue
 
         H, inliers = cv2.estimateAffinePartial2D(
@@ -175,16 +182,24 @@ def main():
                 angle -= 360
             elif angle < -180:
                 angle += 360
-            prev_angle = angle
+
         dxs = good_new[:, 0] - good_old[:, 0]
         dys = good_new[:, 1] - good_old[:, 1]
         avg_dx = np.mean(dxs)
         avg_dy = np.mean(dys)
 
-        # Смещение относительно первого кадра
-        accumulated_offset = np.array([avg_dx, avg_dy])
+        # Используем фильтр Калмана для сглаживания dx, dy и угла
+        measurement = np.array([[np.float32(avg_dx)],
+                                [np.float32(avg_dy)],
+                                [np.float32(angle)]])
+        predicted = kalman.predict()
+        corrected = kalman.correct(measurement)
+        filtered_dx, filtered_dy, filtered_angle = corrected.flatten()
 
-        save_offset(accumulated_offset[0], accumulated_offset[1], angle)
+        accumulated_offset = np.array([filtered_dx, filtered_dy])
+        prev_angle = filtered_angle
+
+        save_offset(accumulated_offset[0], accumulated_offset[1], prev_angle)
 
         vis = frame_proc.copy()
         center = (proc_width // 2, proc_height // 2)
@@ -198,7 +213,7 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         cv2.putText(vis, f"Offset Y: {accumulated_offset[1]:.2f}", (10, 90),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(vis, f"Angle: {angle:.2f}", (10, 120),
+        cv2.putText(vis, f"Angle: {prev_angle:.2f}", (10, 120),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         current_time = time.time()
@@ -220,7 +235,7 @@ def main():
                 accumulated_offset = np.array([0.0, 0.0])
                 prev_angle = 0.0
                 tracking_initialized = True
-                #logging.info("Ручной сброс якоря")
+                kalman = init_kalman()
         elif key == ord('t'):
             t_tracking_flag()
 
